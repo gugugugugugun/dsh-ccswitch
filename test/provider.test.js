@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CcSwitchAdapter } from '../src/adapter.ts'
+import { CcSwitchAdapter, requestHeaders } from '../src/adapter.ts'
 import { modelForRoute } from '../src/provider.ts'
 
 function route(appType, modelId) {
@@ -61,4 +61,12 @@ test('publishes the configured Codex reasoning default to DSH', async () => {
     ],
     defaultEffort: 'minimal',
   })
+})
+
+test('adds the Codex client fingerprint for AgentRouter without overriding a caller header', () => {
+  const agentRouter = route('codex', 'gpt-6.1-sol')
+  agentRouter.baseURL = 'https://agentrouter.org/v1'
+  assert.equal(requestHeaders(agentRouter, 'test-key').originator, 'codex_cli_rs')
+  assert.equal(requestHeaders(agentRouter, 'test-key', { originator: 'custom-client' }).originator, 'custom-client')
+  assert.equal(requestHeaders(route('codex', 'gpt-6.1-sol'), 'test-key').originator, undefined)
 })

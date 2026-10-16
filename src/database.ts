@@ -105,7 +105,7 @@ function codexConfigValue(config: string, key: string): string | undefined {
   return nonEmpty(match?.[1])
 }
 
-function codexProviderConfig(config: string): { baseURL?: string; protocol?: 'openai-completions' | 'openai-responses' } {
+function codexProviderConfig(config: string, meta: Record<string, unknown>): { baseURL?: string; protocol?: 'openai-completions' | 'openai-responses' } {
   const providerId = codexConfigValue(config, 'model_provider')
   if (providerId === undefined) return {}
   const section = config.match(
@@ -115,11 +115,19 @@ function codexProviderConfig(config: string): { baseURL?: string; protocol?: 'op
   )?.[1] ?? ''
   const baseURL = codexConfigValue(section, 'base_url')
   const wireApi = codexConfigValue(section, 'wire_api')
+  const apiFormat = nonEmpty(meta.apiFormat) ?? nonEmpty(meta.api_format)
+  // CC Switch keeps Codex's wire_api=responses even when the selected
+  // upstream only speaks Chat Completions. Its local proxy performs the
+  // Responses <-> Chat conversion. DSH must honor the provider's actual
+  // upstream format when bypassing that proxy.
+  const protocol = apiFormat === 'openai_chat'
+    ? 'openai-completions'
+    : wireApi === 'chat' || wireApi === 'completions'
+      ? 'openai-completions'
+      : 'openai-responses'
   return {
     ...(baseURL === undefined ? {} : { baseURL }),
-    protocol: wireApi === 'chat' || wireApi === 'completions'
-      ? 'openai-completions'
-      : 'openai-responses',
+    protocol,
   }
 }
 
@@ -129,14 +137,37 @@ function stripGeminiModelPrefix(id: string): string {
 
 function defaultModel(settings: Record<string, unknown>, appType: CcSwitchAppType): string {
   const env = objectValue(settings.env)
+  const catalog = objectValue(settings.modelCatalog)
+  const catalogModels = Array.isArray(catalog.models) ? catalog.models : []
+  const catalogFirst = catalogModels.length > 0 ? objectValue(catalogModels[0]) : {}
+  const catalogId = nonEmpty(catalogFirst.model) ?? nonEmpty(catalogFirst.id)
   const value = appType === 'claude'
     ? nonEmpty(settings.model) ?? nonEmpty(env.ANTHROPIC_MODEL)
     : appType === 'codex'
       ? codexConfigValue(nonEmpty(settings.config) ?? '', 'model')
       : nonEmpty(env.GEMINI_MODEL) ?? nonEmpty(settings.model)
-  return value ?? (appType === 'claude'
+  return value ?? catalogId ?? (appType === 'claude'
     ? 'claude-sonnet-4-5'
     : appType === 'codex' ? 'gpt-5.5' : 'gemini-2.5-flash')
+}
+
+function configuredModels(settings: Record<string, unknown>, fallback: string): CcSwitchModel[] {
+  const catalog = objectValue(settings.modelCatalog)
+  const raw = Array.isArray(catalog.models) ? catalog.models : []
+  const models: CcSwitchModel[] = []
+  for (const value of raw) {
+    const item = objectValue(value)
+    const id = nonEmpty(item.model) ?? nonEmpty(item.id)
+    if (id === undefined) continue
+    const name = nonEmpty(item.displayName) ?? id
+    const contextWindow = typeof item.contextWindow === 'number' && item.contextWindow > 0
+      ? Math.floor(item.contextWindow) : DEFAULT_CONTEXT_WINDOW
+    models.push({ id: stripGeminiModelPrefix(id), name, contextWindow, maxTokens: DEFAULT_MAX_TOKENS })
+  }
+  if (models.length === 0) models.push({ id: stripGeminiModelPrefix(fallback), name: stripGeminiModelPrefix(fallback), contextWindow: DEFAULT_CONTEXT_WINDOW, maxTokens: DEFAULT_MAX_TOKENS })
+  const unique = new Map(models.map(model => [model.id, model]))
+  if (!unique.has(stripGeminiModelPrefix(fallback))) unique.set(stripGeminiModelPrefix(fallback), { id: stripGeminiModelPrefix(fallback), name: stripGeminiModelPrefix(fallback), contextWindow: DEFAULT_CONTEXT_WINDOW, maxTokens: DEFAULT_MAX_TOKENS })
+  return [...unique.values()]
 }
 
 function parseConfiguredAuth(
@@ -178,7 +209,7 @@ function routeFromRow(row: ProviderRow, endpoint: string | undefined): { route: 
   const providerType = nonEmpty(row.provider_type)
     ?? nonEmpty(meta.providerType)
     ?? nonEmpty(meta.provider_type)
-  const codex = appType === 'codex' ? codexProviderConfig(nonEmpty(settings.config) ?? '') : {}
+  const codex = appType === 'codex' ? codexProviderConfig(nonEmpty(settings.config) ?? '', meta) : {}
   const auth = parseConfiguredAuth(settings, meta, appType, providerType)
   const hasInlineCredential = appType === 'claude'
     ? envValue(settings, 'ANTHROPIC_AUTH_TOKEN') !== undefined
@@ -218,12 +249,7 @@ function routeFromRow(row: ProviderRow, endpoint: string | undefined): { route: 
       ? 'anthropic-messages'
       : appType === 'gemini' ? 'google-generative-ai' : codex.protocol ?? 'openai-responses',
     defaultModel: stripGeminiModelPrefix(model),
-    models: [{
-      id: stripGeminiModelPrefix(model),
-      name: stripGeminiModelPrefix(model),
-      contextWindow: DEFAULT_CONTEXT_WINDOW,
-      maxTokens: DEFAULT_MAX_TOKENS,
-    }],
+    models: configuredModels(settings, model),
     authKind: auth.kind,
     ...(auth.accountId === undefined ? {} : { accountId: auth.accountId }),
     fingerprint: hash({

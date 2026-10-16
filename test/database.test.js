@@ -65,3 +65,69 @@ test('opens a CC Switch database read-only and discovers a provider', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('uses CC Switch apiFormat and modelCatalog for Codex routes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ccswitch-'))
+  const dataDir = join(root, 'CC Switch Data')
+  const dbPath = join(dataDir, 'cc-switch.db')
+  mkdirSync(dataDir)
+
+  try {
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE providers (
+        id TEXT PRIMARY KEY,
+        app_type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        settings_config TEXT NOT NULL,
+        meta TEXT NOT NULL,
+        provider_type TEXT,
+        sort_index INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE provider_endpoints (
+        id INTEGER PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        app_type TEXT NOT NULL,
+        url TEXT NOT NULL
+      );
+    `)
+    db.prepare(`
+      INSERT INTO providers (id, app_type, name, settings_config, meta, provider_type, sort_index)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'agentrouter',
+      'codex',
+      'AgentRouter',
+      JSON.stringify({
+        OPENAI_API_KEY: 'test-key',
+        config: 'model = "gpt-6.1-sol"\nmodel_provider = "custom"\n\n[model_providers.custom]\nbase_url = "https://agentrouter.org/v1"\nwire_api = "responses"\n',
+        modelCatalog: {
+          models: [
+            { model: 'gpt-6.1-sol', displayName: 'gpt-6.1-sol', contextWindow: 128_000 },
+            { model: 'deepseek-v4-flash', displayName: 'deepseek-v4-flash', contextWindow: 64_000 },
+          ],
+        },
+      }),
+      JSON.stringify({ apiFormat: 'openai_chat' }),
+      null,
+      0,
+    )
+    db.close()
+
+    const repository = new CcSwitchRepository({
+      dbPath,
+      discoverModels: false,
+      providerSelectors: ['*'],
+    })
+    assert.equal(repository.read(), true)
+    const route = repository.current.routes[0]
+    assert.equal(route.protocol, 'openai-completions')
+    assert.equal(route.defaultModel, 'gpt-6.1-sol')
+    assert.deepEqual(route.models, [
+      { id: 'gpt-6.1-sol', name: 'gpt-6.1-sol', contextWindow: 128_000, maxTokens: 32_768 },
+      { id: 'deepseek-v4-flash', name: 'deepseek-v4-flash', contextWindow: 64_000, maxTokens: 32_768 },
+    ])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

@@ -23,7 +23,7 @@ interface Snapshot {
   routes: ReadonlyMap<string, CcSwitchRoute>
 }
 
-function requestHeaders(route: CcSwitchRoute, token: string, extra: Readonly<Record<string, string>> | undefined): Record<string, string | null> {
+export function requestHeaders(route: CcSwitchRoute, token: string, extra: Readonly<Record<string, string>> | undefined): Record<string, string | null> {
   const headers: Record<string, string | null> = { ...extra }
   if (route.authKind === 'claude-token') {
     headers.authorization = `Bearer ${token}`
@@ -35,6 +35,20 @@ function requestHeaders(route: CcSwitchRoute, token: string, extra: Readonly<Rec
     headers.authorization = `Bearer ${token}`
     if (route.accountId !== undefined) headers['chatgpt-account-id'] = route.accountId
     headers.originator = 'cc-switch'
+  }
+  // AgentRouter currently gates generic HTTP clients behind a recognized
+  // Codex client fingerprint. CC Switch's own Codex path supplies this
+  // identity, so preserve the same compatibility when DSH talks to the
+  // upstream directly rather than through CC Switch's local proxy.
+  if (route.appType === 'codex') {
+    try {
+      const host = new URL(route.baseURL).hostname.toLowerCase()
+      if (host === 'agentrouter.org' || host.endsWith('.agentrouter.org')) {
+        headers.originator ??= 'codex_cli_rs'
+      }
+    } catch {
+      // Invalid URLs are handled by the transport later.
+    }
   }
   const attribution = attributionHeaders()
   const reserved = new Set(Object.keys(attribution).map(key => key.toLowerCase()))
